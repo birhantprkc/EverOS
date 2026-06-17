@@ -25,12 +25,12 @@
 - [EverOS: One Memory For All](#everos-one-memory-for-all)
 - [How EverOS Is Different](#how-everos-is-different)
 - [Quick Start](#quick-start)
+- [Use Cases](#use-cases)
 - [Architecture At A Glance](#architecture-at-a-glance)
 - [Storage Layout](#storage-layout)
 - [Features](#features)
 - [Project Structure](#project-structure)
 - [Documentation](#documentation)
-- [Use Cases](#use-cases)
 - [Watch EverOS](#watch-everos)
 - [EverMind Ecosystems](#evermind-ecosystems)
 - [Contributing](#contributing)
@@ -176,30 +176,53 @@ Search independently by <code>user_id</code>, <code>agent_id</code>,
 
 ## Quick Start
 
-### 1. Install EverOS
+> Goal: start EverOS, write one memory, and search it back.
+
+### 0. Prerequisites
+
+- Python 3.12+
+- API keys for the default providers: OpenRouter for chat / multimodal, and
+  DeepInfra for embedding / rerank. You can use other OpenAI-compatible
+  providers by changing the matching `*__BASE_URL` fields in `.env`.
+
+### 1. Install
 
 ```bash
 uv pip install everos
 # or: pip install everos
 ```
 
-### 2. Initialize Configuration
+### 2. Configure
 
-Generate a starter `.env` file, then fill the API key fields shown in
-the generated comments.
+Generate a starter `.env` file, then fill the four API key slots shown in the
+generated comments. Only two distinct keys are needed with the defaults:
+OpenRouter for `LLM` / `MULTIMODAL`, and DeepInfra for `EMBEDDING` / `RERANK`.
 
 ```bash
 everos init
+# or, from a source checkout:
+cp .env.example .env
 ```
 
 `everos init` writes `./.env` by default. Use `everos init --xdg` to
 write `${XDG_CONFIG_HOME:-~/.config}/everos/.env` instead.
 
-### 3. Start The Server
+### 3. Start EverOS
 
 ```bash
-everos --help
 everos server start
+```
+
+Keep the server running, then open a second terminal and check it:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
 ```
 
 `everos server start` searches for `.env` in this order: `--env-file <path>` →
@@ -208,8 +231,61 @@ The endpoint stack is OpenAI-protocol compatible (OpenAI / OpenRouter / vLLM /
 Ollama / DeepInfra) - override `*__BASE_URL` in the generated `.env` to point
 at any of them.
 
-For a step-by-step walkthrough (add a conversation, flush, search, then
-read the markdown), see [QUICKSTART.md](QUICKSTART.md).
+### 4. Try Your First Memory
+
+Add a tiny conversation:
+
+```bash
+TS=$(($(date +%s)*1000))
+
+curl -X POST http://127.0.0.1:8000/api/v1/memory/add \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"session_id\": \"demo-001\",
+    \"app_id\": \"default\",
+    \"project_id\": \"default\",
+    \"messages\": [
+      {\"sender_id\": \"alice\", \"role\": \"user\", \"timestamp\": $TS, \"content\": \"I love climbing in Yosemite every spring.\"},
+      {\"sender_id\": \"alice\", \"role\": \"user\", \"timestamp\": $((TS+10000)), \"content\": \"My favorite coffee shop is Blue Bottle in SOMA.\"}
+    ]
+  }"
+```
+
+Force extraction for the local demo:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/memory/flush \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"demo-001","app_id":"default","project_id":"default"}'
+```
+
+Search it back:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/memory/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "user_id": "alice",
+    "app_id": "default",
+    "project_id": "default",
+    "query": "Where do I like to climb?",
+    "top_k": 5
+  }'
+```
+
+You should see the Yosemite memory in the response. If the result is empty on
+the first try, wait a moment and retry; Markdown is written synchronously, while
+the local index catches up in the background.
+
+> [!TIP]
+> **First memory unlocked.**
+> You just gave EverOS a fact, flushed it into durable Markdown-backed memory,
+> and searched it back through the local index. That is the core loop.
+> Want to see the source of truth? Open `~/.everos` and inspect the generated
+> Markdown files.
+
+For annotated responses and the Markdown files EverOS creates, see
+[QUICKSTART.md](QUICKSTART.md).
 
 ### Optional: Ingest Multimodal Files
 
@@ -260,125 +336,11 @@ make test
 
 </div>
 
-## Architecture At A Glance
-
-```
-┌───────────────────────────────────────────────┐
-│  entrypoints/  (CLI + HTTP API)                │  presentation
-├───────────────────────────────────────────────┤
-│  service/      (use cases: memorize/retrieve)  │  application
-├───────────────────────────────────────────────┤
-│  memory/       (extract + search + cascade)    │  domain
-├───────────────────────────────────────────────┤
-│  infra/        (markdown / sqlite / lancedb)   │  infrastructure
-└───────────────────────────────────────────────┘
-        ↑                    ↑
-   component/            core/
-   (LLM/Embedding)       (observability/lifespan)
-```
-
-DDD 5 layers, single-direction dependency. See [docs/architecture.md](docs/architecture.md).
-
-<br>
-<div align="right">
-
-[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
-
-</div>
-
-## Storage Layout
-
-```
-~/.everos/
-├── default_app/                  # app_id  ("default" → "default_app" on disk)
-│   └── default_project/          # project_id ("default" → "default_project")
-│       ├── users/<user_id>/
-│       │   ├── user.md           # profile
-│       │   ├── episodes/         # daily-log episodes (visible)
-│       │   ├── .atomic_facts/    # nested facts (dotfile-hidden)
-│       │   └── .foresights/      # predictive memory (dotfile-hidden)
-│       └── agents/<agent_id>/
-│           ├── agent.md
-│           ├── .cases/           # one task case per entry
-│           └── skills/           # named procedural memories
-├── .index/                       # derived indexes (rebuildable from md)
-│   ├── sqlite/system.db          # state + queue + audit
-│   └── lancedb/*.lance/          # vector + BM25 + scalar
-└── .tmp/                         # transient working files
-```
-
-Open any `<app>/<project>/users/<user_id>/` folder in Obsidian — your
-agent's brain is just files. The dotfile directories (`.atomic_facts/`,
-`.foresights/`, `.cases/`) stay hidden by default so the visible folder
-is the user-facing memory surface, while extracted derivatives sit
-quietly alongside.
-
-<br>
-<div align="right">
-
-[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
-
-</div>
-
-## Features
-
-- **Hybrid retrieval**: BM25 + cosine vector ANN + scalar filters, backed by LanceDB
-- **Cascade index sync**: edit a `.md` → file watcher → entry-level diff → LanceDB sync, sub-second
-- **Multi-source extraction**: conversations / agent trajectories / file knowledge
-- **Dual-track memory**: user-track (Episodes / Profiles) + agent-track (Cases / Skills)
-- **Async-first**: full asyncio, single event loop
-- **Multi-modal**: text + small image / audio inline; large media via S3/OSS reference
-
-<br>
-<div align="right">
-
-[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
-
-</div>
-
-## Project Structure
-
-```
-everos/                        # repo root
-├── src/everos/                # main package (src layout)
-│   ├── entrypoints/           # cli + api
-│   ├── service/               # use case orchestration
-│   ├── memory/                # domain: extract + search + cascade + prompt_slots
-│   ├── infra/                 # storage: markdown + lancedb + sqlite
-│   ├── component/             # cross-cutting: llm / embedding / config / utils
-│   ├── core/                  # runtime: observability / lifespan / context
-│   └── config/                # configuration data + Settings schema
-├── tests/                     # unit / integration / golden / fixtures
-├── docs/                      # design docs
-└── .claude/                   # team-shared rules + skills (auto-loaded by Claude Code)
-```
-<br>
-<div align="right">
-
-[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
-
-</div>
-
-## Documentation
-
-- [docs/overview.md](docs/overview.md) — Project overview & vision
-- [docs/architecture.md](docs/architecture.md) — DDD layered architecture & dependency rules
-- [docs/engineering.md](docs/engineering.md) — Engineering & dev-efficiency infrastructure (CI / tooling / Claude Code)
-- [docs/use-cases.md](docs/use-cases.md) — Full use-case gallery and integration examples
-- [docs/migration-to-1.0.0.md](docs/migration-to-1.0.0.md) — Legacy API and infrastructure migration notes
-- [CHANGELOG.md](CHANGELOG.md) — Release notes
-- [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
-- [.claude/rules/](.claude/rules/) — Detailed coding conventions (auto-loaded by Claude Code)
-
-<br>
-<div align="right">
-
-[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
-
-</div>
-
-
 ## Use Cases
+
+Now that you have had your first successful EverOS moment, explore what people
+are building with persistent memory across agents, apps, and community
+integrations.
 
 Use cases show what persistent memory makes possible in real products and
 workflows. Some examples are packaged in this repository; others point to
@@ -706,6 +668,125 @@ Explore stored entities and relationships in a graph interface. Frontend demo; b
 [![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
 
 </div>
+
+## Architecture At A Glance
+
+```
+┌───────────────────────────────────────────────┐
+│  entrypoints/  (CLI + HTTP API)                │  presentation
+├───────────────────────────────────────────────┤
+│  service/      (use cases: memorize/retrieve)  │  application
+├───────────────────────────────────────────────┤
+│  memory/       (extract + search + cascade)    │  domain
+├───────────────────────────────────────────────┤
+│  infra/        (markdown / sqlite / lancedb)   │  infrastructure
+└───────────────────────────────────────────────┘
+        ↑                    ↑
+   component/            core/
+   (LLM/Embedding)       (observability/lifespan)
+```
+
+DDD 5 layers, single-direction dependency. See [docs/architecture.md](docs/architecture.md).
+
+<br>
+<div align="right">
+
+[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
+
+</div>
+
+## Storage Layout
+
+```
+~/.everos/
+├── default_app/                  # app_id  ("default" → "default_app" on disk)
+│   └── default_project/          # project_id ("default" → "default_project")
+│       ├── users/<user_id>/
+│       │   ├── user.md           # profile
+│       │   ├── episodes/         # daily-log episodes (visible)
+│       │   ├── .atomic_facts/    # nested facts (dotfile-hidden)
+│       │   └── .foresights/      # predictive memory (dotfile-hidden)
+│       └── agents/<agent_id>/
+│           ├── agent.md
+│           ├── .cases/           # one task case per entry
+│           └── skills/           # named procedural memories
+├── .index/                       # derived indexes (rebuildable from md)
+│   ├── sqlite/system.db          # state + queue + audit
+│   └── lancedb/*.lance/          # vector + BM25 + scalar
+└── .tmp/                         # transient working files
+```
+
+Open any `<app>/<project>/users/<user_id>/` folder in Obsidian — your
+agent's brain is just files. The dotfile directories (`.atomic_facts/`,
+`.foresights/`, `.cases/`) stay hidden by default so the visible folder
+is the user-facing memory surface, while extracted derivatives sit
+quietly alongside.
+
+<br>
+<div align="right">
+
+[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
+
+</div>
+
+## Features
+
+- **Hybrid retrieval**: BM25 + cosine vector ANN + scalar filters, backed by LanceDB
+- **Cascade index sync**: edit a `.md` → file watcher → entry-level diff → LanceDB sync, sub-second
+- **Multi-source extraction**: conversations / agent trajectories / file knowledge
+- **Dual-track memory**: user-track (Episodes / Profiles) + agent-track (Cases / Skills)
+- **Async-first**: full asyncio, single event loop
+- **Multi-modal**: text + small image / audio inline; large media via S3/OSS reference
+
+<br>
+<div align="right">
+
+[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
+
+</div>
+
+## Project Structure
+
+```
+everos/                        # repo root
+├── src/everos/                # main package (src layout)
+│   ├── entrypoints/           # cli + api
+│   ├── service/               # use case orchestration
+│   ├── memory/                # domain: extract + search + cascade + prompt_slots
+│   ├── infra/                 # storage: markdown + lancedb + sqlite
+│   ├── component/             # cross-cutting: llm / embedding / config / utils
+│   ├── core/                  # runtime: observability / lifespan / context
+│   └── config/                # configuration data + Settings schema
+├── tests/                     # unit / integration / golden / fixtures
+├── docs/                      # design docs
+└── .claude/                   # team-shared rules + skills (auto-loaded by Claude Code)
+```
+<br>
+<div align="right">
+
+[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
+
+</div>
+
+## Documentation
+
+- [docs/overview.md](docs/overview.md) — Project overview & vision
+- [docs/architecture.md](docs/architecture.md) — DDD layered architecture & dependency rules
+- [docs/engineering.md](docs/engineering.md) — Engineering & dev-efficiency infrastructure (CI / tooling / Claude Code)
+- [docs/use-cases.md](docs/use-cases.md) — Full use-case gallery and integration examples
+- [docs/migration-to-1.0.0.md](docs/migration-to-1.0.0.md) — Legacy API and infrastructure migration notes
+- [CHANGELOG.md](CHANGELOG.md) — Release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
+- [.claude/rules/](.claude/rules/) — Detailed coding conventions (auto-loaded by Claude Code)
+
+<br>
+<div align="right">
+
+[![](https://img.shields.io/badge/-Back_to_top-gray?style=flat-square)](#readme-top)
+
+</div>
+
+
 
 ## Watch EverOS
 
