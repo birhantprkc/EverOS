@@ -235,7 +235,7 @@ A context-native AI wearable that listens to everyday life and converts conversa
 
 #### Legacy OpenClaw Agent Memory
 
-Archived pre-1.0.0 plugin reference. New integrations should use the EverOS 1.0.0 API.
+Archived pre-1.0.0 plugin reference. New integrations should use the current EverOS API.
 
 [Learn more](migration-to-1.0.0.md)
 
